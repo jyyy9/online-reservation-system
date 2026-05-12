@@ -1,29 +1,20 @@
 #include "mysql_client.h"
-#include "redis_client.h"  
+#include "redis_client.h"
+#include "mysql_pool.h" 
 #include <iostream>
+#include <thread>
 
-bool mysql_client::mysql_con_ser()
-{
-    MYSQL *mysql = mysql_init(&mysql_con);
-    if (mysql == NULL)
-    {
-        return false;
-    }
-    mysql = mysql_real_connect(mysql, db_host.c_str(), db_user.c_str(), db_passwd.c_str(), db_name.c_str(), port, NULL, 0);
-    if (mysql == NULL)
-    {
-        cout << "connect db err" << endl;
-        return false;
-    }
-    return true;
-}
 bool mysql_client::mysql_Register(const string &username, const string &passwd, const string &realname, const string &id_card, const string &usertel, GENDER gen)
 {
+    MySQLGuard guard;
+    MYSQL *mysql_con = guard.conn();
+    if (!mysql_con)
+        return false;
     string sql = string("insert into `user_info` values(0,'") + username + string("','") + passwd + string("','") + realname + string("','") + id_card + string("','") + usertel + string("',") + to_string(static_cast<int>(gen)) + string(",NOW(),NOW(),1);");
-    if (mysql_query(&mysql_con, sql.c_str()) != 0)
+    if (mysql_query(mysql_con, sql.c_str()) != 0)
     {
         cout << "注册失败！数据库错误！" << endl;
-        cout << "数据库错误原因：" << mysql_error(&mysql_con) << endl;
+        cout << "数据库错误原因：" << mysql_error(mysql_con) << endl;
         cout << "执行的SQL语句：" << sql << endl;
         return false;
     }
@@ -33,16 +24,20 @@ bool mysql_client::mysql_Register(const string &username, const string &passwd, 
 
 bool mysql_client::mysql_Login(const string &usertel, const string &passwd, string &username)
 {
+    MySQLGuard guard;
+    MYSQL *mysql_con = guard.conn();
+    if (!mysql_con)
+        return false;
     // 先看手机号码到底存不存在
     // select username,passwd from user_info where phone=17789023478;
     string sql = string("select username,passwd from user_info where phone='") + usertel + string("'");
     // mysql_query执行sql语句，成功返回0
-    if (mysql_query(&mysql_con, sql.c_str()) != 0)
+    if (mysql_query(mysql_con, sql.c_str()) != 0)
     {
         cout << "登录失败！" << endl;
         return false;
     }
-    MYSQL_RES *r = mysql_store_result(&mysql_con); // 获取结果集
+    MYSQL_RES *r = mysql_store_result(mysql_con); // 获取结果集
     if (r == NULL)
     {
         cout << "提取结果集失败！" << endl;
@@ -68,25 +63,30 @@ bool mysql_client::mysql_Login(const string &usertel, const string &passwd, stri
 }
 bool mysql_client::mysql_User_Show_Ticket(Json::Value &resval)
 {
-    //1.先去查redis
+    MySQLGuard guard;
+    MYSQL *mysql_con = guard.conn();
+    if (!mysql_con)
+        return false;
+    // 1.先去查redis
     string redis_key = "ticket:all";
     string redis_val;
-    if (Redis::get(redis_key, redis_val)) {  // 直接用你的 Redis::get()
+    if (Redis::get(redis_key, redis_val))
+    { // 直接用你的 Redis::get()
         Json::Reader reader;
         reader.parse(redis_val, resval);
         return true;
     }
     // select ticket_id,ticket_name,total_stock,use_date, booked_count from ticket_info;
     string sql = "select ticket_id,ticket_name,price,total_stock,max_per_user,use_date,booked_count from ticket_info;";
-    if (mysql_query(&mysql_con, sql.c_str()) != 0)
+    if (mysql_query(mysql_con, sql.c_str()) != 0)
     {
-        cout << "sql语句执行失败！" << mysql_error(&mysql_con) << endl;
+        cout << "sql语句执行失败！" << mysql_error(mysql_con) << endl;
         return false;
     }
-    MYSQL_RES *r = mysql_store_result(&mysql_con);
+    MYSQL_RES *r = mysql_store_result(mysql_con);
     if (r == NULL)
     {
-        cout << "提取结果集失败！" << mysql_error(&mysql_con) << endl;
+        cout << "提取结果集失败！" << mysql_error(mysql_con) << endl;
         return false;
     }
 
@@ -121,57 +121,51 @@ bool mysql_client::mysql_User_Show_Ticket(Json::Value &resval)
         */
     }
     mysql_free_result(r);
-    //写入redis
-    Json::FastWriter writer;
-    Redis::set(redis_key, writer.write(resval), 300);
+    // 异步写Redis
+    std::thread([=]() {
+        Json::FastWriter writer;
+        Redis::set(redis_key, writer.write(resval), 300);
+    }).detach();
     return true;
 }
-bool mysql_client::mysql_user_begin()
+bool mysql_client::mysql_user_begin(MYSQL* conn)
 {
-    if (mysql_query(&mysql_con, "begin") != 0)
-    {
-        return false;
-    }
-    return true;
+    return mysql_query(conn, "begin") == 0;
 }
-bool mysql_client::mysql_user_commit()
+bool mysql_client::mysql_user_commit(MYSQL* conn)
 {
-    if (mysql_query(&mysql_con, "commit") != 0)
-    {
-        return false;
-    }
-    return true;
+    return mysql_query(conn, "commit") == 0;
 }
-bool mysql_client::mysql_user_rollback()
+bool mysql_client::mysql_user_rollback(MYSQL* conn)
 {
-    if (mysql_query(&mysql_con, "rollback") != 0)
-    {
-        return false;
-    }
-    return true;
+    return mysql_query(conn, "rollback") == 0;
 }
 bool mysql_client::mysql_User_Book_Ticket(int ticket_id, string usertel, int num)
 {
-    mysql_user_begin(); // 启动事务
+    MySQLGuard guard;
+    MYSQL *mysql_con = guard.conn();
+    if (!mysql_con)
+        return false;
+    mysql_user_begin(mysql_con); // 启动事务
     string s1 = string("select total_stock,booked_count,use_date,max_per_user from ticket_info where ticket_id=") + to_string(ticket_id);
-    if (mysql_query(&mysql_con, s1.c_str()) != 0)
+    if (mysql_query(mysql_con, s1.c_str()) != 0)
     {
         cout << "查询失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
-    MYSQL_RES *r = mysql_store_result(&mysql_con);
+    MYSQL_RES *r = mysql_store_result(mysql_con);
     if (r == NULL)
     {
         cout << "提取结果集失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     int Num = mysql_num_rows(r);
     if (Num != 1)
     {
         cout << "记录行不唯一！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     MYSQL_ROW row = mysql_fetch_row(r);
@@ -188,29 +182,29 @@ bool mysql_client::mysql_User_Book_Ticket(int ticket_id, string usertel, int num
     if (tk_total_stock <= tk_booked_count)
     {
         cout << "票已经售罄" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     /*SELECT IFNULL(SUM(book_num), 0) AS has_booked FROM user_order WHERE user_tel = 18902389403 AND ticket_id = 1 AND status = 1;*/
     string s2 = string("SELECT IFNULL(SUM(book_num), 0) AS has_booked FROM user_order WHERE user_tel = '") + usertel + string("' AND ticket_id = ") + to_string(ticket_id) + string(" AND status = 1;");
-    if (mysql_query(&mysql_con, s2.c_str()) != 0)
+    if (mysql_query(mysql_con, s2.c_str()) != 0)
     {
         cout << "查询订票记录失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
-    MYSQL_RES *r2 = mysql_store_result(&mysql_con);
+    MYSQL_RES *r2 = mysql_store_result(mysql_con);
     if (r2 == NULL)
     {
         cout << "提取结果集失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     int Num2 = mysql_num_rows(r2);
     if (Num2 != 1)
     {
         cout << "记录行不唯一！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     MYSQL_ROW row2 = mysql_fetch_row(r2);
@@ -222,28 +216,28 @@ bool mysql_client::mysql_User_Book_Ticket(int ticket_id, string usertel, int num
     if (num + booknum2 > tk_max_per_user)
     {
         cout << "单人购买量已经超过上限" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     tk_booked_count += num;
     string s3 = string("update ticket_info set booked_count=") + to_string(tk_booked_count) + string(" where ticket_id=") + to_string(ticket_id) + string(";");
-    if (mysql_query(&mysql_con, s3.c_str()) != 0)
+    if (mysql_query(mysql_con, s3.c_str()) != 0)
     {
         cout << "修改预定票数失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     // 执行sql,尝试更新原有订单
     // UPDATE user_order SET book_num = book_num + 1 WHERE user_tel = 18902389403 AND ticket_id = 1 AND status = 1;
     string s4 = string("UPDATE user_order SET book_num = book_num + ") + to_string(num) + string(" WHERE user_tel ='") + usertel + string("' AND ticket_id =") + to_string(ticket_id) + string(" AND status = 1;");
-    if (mysql_query(&mysql_con, s4.c_str()) != 0)
+    if (mysql_query(mysql_con, s4.c_str()) != 0)
     {
         cout << "尝试更新原有订单失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     // 判断有没有在原数据上更新，1更新了，0没有更新（要新增）
-    int affected_rows = mysql_affected_rows(&mysql_con);
+    int affected_rows = mysql_affected_rows(mysql_con);
     if (affected_rows == 0)
     {
         // 拼接插入SQL
@@ -251,40 +245,45 @@ bool mysql_client::mysql_User_Book_Ticket(int ticket_id, string usertel, int num
                     "VALUES('" +
                     usertel + "', " + to_string(ticket_id) + ", " + to_string(num) + ", '" + str_use_date + "');";
 
-        if (mysql_query(&mysql_con, s5.c_str()) != 0)
+        if (mysql_query(mysql_con, s5.c_str()) != 0)
         {
             cout << "新增订单失败！" << endl;
-            mysql_user_rollback();
+            mysql_user_rollback(mysql_con);
             return false;
         }
     }
-    mysql_user_commit();
+    mysql_user_commit(mysql_con);
     Redis::del("ticket:stock:" + to_string(ticket_id));
     Redis::del("ticket:all");
     return true;
 }
 bool mysql_client::mysql_User_Show_My_Ticlet(Json::Value &resval, string usertel)
 {
-    //先查redis
+    MySQLGuard guard;
+    MYSQL *mysql_con = guard.conn();
+    if (!mysql_con)
+        return false;
+    // 先查redis
     string key = "user:order:" + usertel;
     string val;
 
-    if (Redis::get(key, val)) {
+    if (Redis::get(key, val))
+    {
         Json::Reader reader;
         reader.parse(val, resval);
         return true;
     }
     // select *from user_order;
     string sql = string("select *from user_order where user_tel='") + usertel + string("';");
-    if (mysql_query(&mysql_con, sql.c_str()) != 0)
+    if (mysql_query(mysql_con, sql.c_str()) != 0)
     {
-        cout << "sql语句执行失败！" << mysql_error(&mysql_con) << endl;
+        cout << "sql语句执行失败！" << mysql_error(mysql_con) << endl;
         return false;
     }
-    MYSQL_RES *r = mysql_store_result(&mysql_con);
+    MYSQL_RES *r = mysql_store_result(mysql_con);
     if (r == NULL)
     {
-        cout << "提取结果集失败！" << mysql_error(&mysql_con) << endl;
+        cout << "提取结果集失败！" << mysql_error(mysql_con) << endl;
         return false;
     }
 
@@ -314,32 +313,38 @@ bool mysql_client::mysql_User_Show_My_Ticlet(Json::Value &resval, string usertel
 
         resval["ticket_arr"].append(tmp);
     }
-
-    Json::FastWriter writer;
-    Redis::set(key, writer.write(resval), 60);
+    // 异步写Redis，秒回不卡顿
+   std::thread([=]() {
+        Json::FastWriter writer;
+        Redis::set(key, writer.write(resval), 60);
+    }).detach();
     return true;
 }
 bool mysql_client::mysql_User_Cancel_Ticket(int ticket_id, string usertel, int num)
 {
-    mysql_user_begin(); // 启动事务
-    string s1 = string("select book_num from user_order where user_tel='") + usertel + string("' AND ticket_id = ")+to_string(ticket_id)+string(" AND status = 1;");
-    if (mysql_query(&mysql_con, s1.c_str()) != 0)
+    MySQLGuard guard;
+    MYSQL *mysql_con = guard.conn();
+    if (!mysql_con)
+        return false;
+    mysql_user_begin(mysql_con); // 启动事务
+    string s1 = string("select book_num from user_order where user_tel='") + usertel + string("' AND ticket_id = ") + to_string(ticket_id) + string(" AND status = 1;");
+    if (mysql_query(mysql_con, s1.c_str()) != 0)
     {
         cout << "查询失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
-    MYSQL_RES *r1 = mysql_store_result(&mysql_con);
+    MYSQL_RES *r1 = mysql_store_result(mysql_con);
     if (r1 == NULL)
     {
-        cout << "提取结果集失败！" << mysql_error(&mysql_con) << endl;
+        cout << "提取结果集失败！" << mysql_error(mysql_con) << endl;
         return false;
     }
     int n1 = mysql_num_rows(r1);
     if (n1 == 0)
     {
         cout << "查不到此人的预定信息" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     MYSQL_ROW row1 = mysql_fetch_row(r1);
@@ -351,16 +356,16 @@ bool mysql_client::mysql_User_Cancel_Ticket(int ticket_id, string usertel, int n
     if (book_num < num)
     {
         cout << "取消票数过多！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     else if (book_num == num)
     {
-        string s2=string("DELETE FROM user_order WHERE user_tel = '")+usertel+string("' AND ticket_id =")+to_string(ticket_id)+string(" AND status = 1;");
-        if (mysql_query(&mysql_con, s2.c_str()) != 0)
+        string s2 = string("DELETE FROM user_order WHERE user_tel = '") + usertel + string("' AND ticket_id =") + to_string(ticket_id) + string(" AND status = 1;");
+        if (mysql_query(mysql_con, s2.c_str()) != 0)
         {
             cout << "取消预定票数失败！" << endl;
-            mysql_user_rollback();
+            mysql_user_rollback(mysql_con);
             return false;
         }
     }
@@ -368,34 +373,34 @@ bool mysql_client::mysql_User_Cancel_Ticket(int ticket_id, string usertel, int n
     {
         book_num -= num;
         // user_order
-        string s3 = string("UPDATE user_order SET book_num = ") + to_string(book_num) + string(" WHERE user_tel = '") + usertel + string("' AND ticket_id = ")+to_string(ticket_id)+string(" AND status = 1;");
-        if (mysql_query(&mysql_con, s3.c_str()) != 0)
+        string s3 = string("UPDATE user_order SET book_num = ") + to_string(book_num) + string(" WHERE user_tel = '") + usertel + string("' AND ticket_id = ") + to_string(ticket_id) + string(" AND status = 1;");
+        if (mysql_query(mysql_con, s3.c_str()) != 0)
         {
             cout << "修改预定票数失败！" << endl;
-            mysql_user_rollback();
+            mysql_user_rollback(mysql_con);
             return false;
         }
     }
 
     // ticket_info
     string s4 = string("select booked_count from ticket_info where ticket_id=") + to_string(ticket_id) + string(";");
-    if (mysql_query(&mysql_con, s4.c_str()) != 0)
+    if (mysql_query(mysql_con, s4.c_str()) != 0)
     {
         cout << "查询失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
-    MYSQL_RES *r2 = mysql_store_result(&mysql_con);
+    MYSQL_RES *r2 = mysql_store_result(mysql_con);
     if (r2 == NULL)
     {
-        cout << "提取结果集失败！" << mysql_error(&mysql_con) << endl;
+        cout << "提取结果集失败！" << mysql_error(mysql_con) << endl;
         return false;
     }
     int n2 = mysql_num_rows(r2);
     if (n2 == 0)
     {
         cout << "查不到此门票的信息" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
     MYSQL_ROW row2 = mysql_fetch_row(r2);
@@ -405,13 +410,13 @@ bool mysql_client::mysql_User_Cancel_Ticket(int ticket_id, string usertel, int n
     bookedcount -= num;
     // UPDATE ticket_info SET booked_count = 1 WHERE ticket_id = 2;
     string s5 = string("UPDATE ticket_info SET booked_count =") + to_string(bookedcount) + string(" WHERE ticket_id =") + to_string(ticket_id) + string(";");
-    if (mysql_query(&mysql_con, s5.c_str()) != 0)
+    if (mysql_query(mysql_con, s5.c_str()) != 0)
     {
         cout << "修改全部预定票数失败！" << endl;
-        mysql_user_rollback();
+        mysql_user_rollback(mysql_con);
         return false;
     }
-    mysql_user_commit();
+    mysql_user_commit(mysql_con);
     Redis::del("user:order:" + usertel);
     Redis::del("ticket:stock:" + to_string(ticket_id));
     Redis::del("ticket:all");

@@ -92,11 +92,6 @@ void socket_con::User_Register()
     }
 
     mysql_client cli;
-    if (!cli.mysql_con_ser())
-    {
-        Send_err();
-        return;
-    }
     if (!cli.mysql_Register(username, passwd, realname, id_card, usertel, gen))
     {
         Send_err();
@@ -111,11 +106,6 @@ void socket_con::User_Login()
     passwd = val["user_passwd"].asString();
 
     mysql_client cli;
-    if (!cli.mysql_con_ser())
-    {
-        Send_err();
-        return;
-    }
     if (!cli.mysql_Login(usertel, passwd, username))
     {
         Send_err();
@@ -137,11 +127,6 @@ void socket_con::User_Show_Ticket()
     // 每次调用数据库函数之前先去连接数据库
 
     mysql_client cli;
-    if (!cli.mysql_con_ser())
-    {
-        Send_err();
-        return;
-    }
     if (!cli.mysql_User_Show_Ticket(resval))
     {
         Send_err();
@@ -162,12 +147,6 @@ void socket_con::User_Book_Ticket()
     int num = val["book_num"].asInt();
 
     mysql_client cli;
-    if (!cli.mysql_con_ser())
-    {
-        cout << "connect con err!" << endl;
-        Send_err();
-        return;
-    }
     if (!cli.mysql_User_Book_Ticket(ticket_id, usertel, num))
     {
         Send_err();
@@ -181,11 +160,6 @@ void socket_con::User_Show_My_Ticlet()
     usertel = val["user_tel"].asString();
 
     mysql_client cli;
-    if (!cli.mysql_con_ser())
-    {
-        Send_err();
-        return;
-    }
     if (!cli.mysql_User_Show_My_Ticlet(val, usertel))
     {
         Send_err();
@@ -205,11 +179,6 @@ void socket_con::User_Cancel_Ticket()
     int num = val["book_num"].asInt();
 
     mysql_client cli;
-    if (!cli.mysql_con_ser())
-    {
-        Send_err();
-        return;
-    }
     if (!cli.mysql_User_Cancel_Ticket(ticketid, usertel, num))
     {
         Send_err();
@@ -331,6 +300,10 @@ void SOCK_LIS_CALLBACK(int sockfd, short ev, void *arg)
 }
 int main()
 {
+    if(!MySQLPool::instance().init("127.0.0.1", "root", "123456", "Online_Res_DB", 3306, 10)){
+    cout << "Mysql 连接池初始化失败！" << endl;
+    exit(1);  
+    }
     // 初始化 Redis 连接池
     if (!RedisPool::instance().init("127.0.0.1", 6379, 10)) {
     cout << "Redis 连接池初始化失败！" << endl;
