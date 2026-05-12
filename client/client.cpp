@@ -1,6 +1,7 @@
 #include "client.h"
+using namespace std;
 
-bool send_json_msg(int sockfd, const Json::Value &val)
+bool socket_client::send_json_msg(int sockfd, const Json::Value &val)
 {
     Json::FastWriter writer;
     writer.omitEndingLineFeed();

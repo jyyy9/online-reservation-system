@@ -1,5 +1,6 @@
 #pragma once
-#include "redis_pool.h"
+#include <string>      
+#include <hiredis/hiredis.h>
 
 class Redis {
 public:

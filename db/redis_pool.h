@@ -11,7 +11,6 @@ public:
     bool init(const std::string& ip, int port, int size = 10);
     redisContext* get();
     void put(redisContext* ctx);
-
 private:
     RedisPool() = default;
     redisContext* create_conn(const std::string& ip, int port);

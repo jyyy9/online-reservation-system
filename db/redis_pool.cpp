@@ -59,6 +59,8 @@ redisContext* RedisPool::create_conn(const string& ip, int port) {
     return ctx;
 }
 
+
+
 // ====================== RedisGuard 实现 ======================
 RedisGuard::RedisGuard() {
     _ctx = RedisPool::instance().get();
