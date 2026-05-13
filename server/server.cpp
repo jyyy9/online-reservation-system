@@ -1,7 +1,10 @@
-#include "server.h" 
+#include "server.h"
 #include "db/mysql_client.h"
 #include "db/redis_client.h"
 #include "db/redis_pool.h"
+
+// 创建全局线程池
+ThreadPool g_pool(20); // 20个工作线程
 
 void SOCK_CON_CALLBACK(int sockfd, short ev, void *arg); // 函数声明
 
@@ -68,7 +71,7 @@ void socket_con::Send_err()
     int len = send_str.size();
 
     char send_buff[4096];
-    *(int*)send_buff = htonl(len);
+    *(int *)send_buff = htonl(len);
     memcpy(send_buff + 4, send_str.c_str(), len);
     send(c, send_buff, len + 4, 0);
 }
@@ -82,7 +85,7 @@ void socket_con::Send_ok()
     int len = send_str.size();
 
     char send_buff[4096];
-    *(int*)send_buff = htonl(len);
+    *(int *)send_buff = htonl(len);
     memcpy(send_buff + 4, send_str.c_str(), len);
     send(c, send_buff, len + 4, 0);
 }
@@ -131,7 +134,7 @@ void socket_con::User_Login()
     int len = send_str.size();
 
     char send_buff[4096];
-    *(int*)send_buff = htonl(len);
+    *(int *)send_buff = htonl(len);
     memcpy(send_buff + 4, send_str.c_str(), len);
     send(c, send_buff, len + 4, 0);
     return;
@@ -145,7 +148,7 @@ void socket_con::User_Show_Ticket()
     mysql_client cli;
     if (!cli.mysql_User_Show_Ticket(resval))
     {
-        cout << "mysql_User_Show_Ticket failed" << endl; 
+        cout << "mysql_User_Show_Ticket failed" << endl;
         Send_err();
         return;
     }
@@ -157,10 +160,10 @@ void socket_con::User_Show_Ticket()
     int len = send_str.size();
 
     char send_buff[4096];
-    *(int*)send_buff = htonl(len);
+    *(int *)send_buff = htonl(len);
     memcpy(send_buff + 4, send_str.c_str(), len);
     send(c, send_buff, len + 4, 0);
-    cout << "response sent" << endl; 
+    cout << "response sent" << endl;
     return;
 }
 
@@ -198,7 +201,7 @@ void socket_con::User_Show_My_Ticlet()
     int len = send_str.size();
 
     char send_buff[4096];
-    *(int*)send_buff = htonl(len);
+    *(int *)send_buff = htonl(len);
     memcpy(send_buff + 4, send_str.c_str(), len);
     send(c, send_buff, len + 4, 0);
     return;
@@ -220,28 +223,30 @@ void socket_con::User_Cancel_Ticket()
 }
 void socket_con::Recv_data() // 第一步：收到客户端发来的数据
 {
-    //1.接收长度
+    // 1.接收长度
     char len_buff[4]{0};
     int n = recv(c, len_buff, 4, MSG_WAITALL); // recv收到数据(报文)
-    if (4!=n)
+    if (4 != n)
     {
         cout << "client close" << endl;
         delete this;
         return;
     }
 
-    //转成主机字节序
-    int data_len=ntohl(*(int*)len_buff);
-    if (data_len <= 0 || data_len > 4096) { // 限制最大长度，防止攻击
+    // 转成主机字节序
+    int data_len = ntohl(*(int *)len_buff);
+    if (data_len <= 0 || data_len > 4096)
+    { // 限制最大长度，防止攻击
         cout << "非法数据长度" << endl;
         Send_err();
         return;
     }
 
-    //2.接收JSON数据
+    // 2.接收JSON数据
     char data_buff[4096] = {0};
-    n = recv(c, data_buff, data_len, MSG_WAITALL);//不收满指定字节数(4)，绝不返回
-    if (n != data_len) {
+    n = recv(c, data_buff, data_len, MSG_WAITALL); // 不收满指定字节数(4)，绝不返回
+    if (n != data_len)
+    {
         cout << "接收数据失败" << endl;
         Send_err();
         return;
@@ -251,45 +256,55 @@ void socket_con::Recv_data() // 第一步：收到客户端发来的数据
     cout << "recv=" << data_buff << endl;
 
     // 解析(反序列化)
+    Json::Value val;
     Json::Reader Read;
-    if (!Read.parse(data_buff, data_buff + data_len,val))
+    if (!Read.parse(data_buff, data_buff + data_len, val))
     {
         cout << "Recv_data:解析json失败！" << endl;
         Send_err();
         return;
     }
 
-    // 拿出操作类型，调用相关的函数
-    int ops = val["type"].asInt();
+    socket_con *self = this;
+    self->AddRef(); // 防止线程执行前对象被销毁
 
-    switch (ops)
-    {
-    case (int)OP_TYPE::LOGIN:
-        User_Login();
-        break;
-    case (int)OP_TYPE::REGISTER:
-        User_Register();
-        break;
-    case (int)OP_TYPE::VIEW_AVAILABLE_BOOKING:
-        User_Show_Ticket();
-        break;
-    case (int)OP_TYPE::BOOK_APPOINTMENT:
-        User_Book_Ticket();
-        break;
-    case (int)OP_TYPE::VIEW_MY_BOOKING:
-        User_Show_My_Ticlet();
-        break;
-    case (int)OP_TYPE::CANCEL_MY_BOOKING:
-        User_Cancel_Ticket();
-        break;
-    case (int)OP_TYPE::LOGOUT:
-        ops = false;
-        break;
+    // 抛给线程池执行***
+    g_pool.add_task([self, val]()
+                    {
+                        self->val = val;
+                        // 拿出操作类型，调用相关的函数
+                        int ops = self->val["type"].asInt();
 
-    default:
-        cout << "输入无效！" << endl;
-        break;
-    }
+                        switch (ops)
+                        {
+                        case (int)OP_TYPE::LOGIN:
+                            self->User_Login();
+                            break;
+                        case (int)OP_TYPE::REGISTER:
+                            self->User_Register();
+                            break;
+                        case (int)OP_TYPE::VIEW_AVAILABLE_BOOKING:
+                            self->User_Show_Ticket();
+                            break;
+                        case (int)OP_TYPE::BOOK_APPOINTMENT:
+                            self->User_Book_Ticket();
+                            break;
+                        case (int)OP_TYPE::VIEW_MY_BOOKING:
+                            self->User_Show_My_Ticlet();
+                            break;
+                        case (int)OP_TYPE::CANCEL_MY_BOOKING:
+                            self->User_Cancel_Ticket();
+                            break;
+                        case (int)OP_TYPE::LOGOUT:
+                            ops = false;
+                            break;
+
+                        default:
+                            cout << "输入无效！" << endl;
+                            break;
+                        }
+                        self->ReleaseRef(); // 减引用
+                    });
 }
 
 //---callback
@@ -331,15 +346,17 @@ void SOCK_LIS_CALLBACK(int sockfd, short ev, void *arg)
 }
 int main()
 {
-    if(!MySQLPool::instance().init("127.0.0.1", "root", "123456", "Online_Res_DB", 3306, 10)){
-    cout << "Mysql 连接池初始化失败！" << endl;
-    exit(1);  
+    if (!MySQLPool::instance().init("127.0.0.1", "root", "123456", "Online_Res_DB", 3306, 10))
+    {
+        cout << "Mysql 连接池初始化失败！" << endl;
+        exit(1);
     }
     // 初始化 Redis 连接池
-    if (!RedisPool::instance().init("127.0.0.1", 6379, 10)) {
-    cout << "Redis 连接池初始化失败！" << endl;
-    exit(1);
-}
+    if (!RedisPool::instance().init("127.0.0.1", 6379, 10))
+    {
+        cout << "Redis 连接池初始化失败！" << endl;
+        exit(1);
+    }
     // 监听套接字
     socket_listen sock_ser;
     if (!sock_ser.socket_init())

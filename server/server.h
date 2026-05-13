@@ -16,6 +16,11 @@
 #include<hiredis/hiredis.h>
 #include<vector>//存放连接
 #include<mutex>//多线程锁
+#include <queue>
+#include <condition_variable>
+#include <thread>
+#include <functional>
+#include <atomic>
 
 using namespace std;
 
@@ -92,11 +97,16 @@ public:
     void User_Show_My_Ticlet();//查看我的预约信息
     void User_Cancel_Ticket();//取消预约
 
+    void AddRef() { ref_++; }
+    void ReleaseRef() { if (--ref_ == 0) delete this; }
+
 private:
     int c;              // 文件描述符
     struct event *c_ev; // 是一个libevent事件,是一个指针
     Json::FastWriter writer;
     Json::Value val; // 存储从客户端传入的数据，Json格式
+
+    std::atomic<int> ref_{1};
 
     string username; // 用户名
     string usertel;  // 电话
@@ -106,3 +116,53 @@ private:
     string id_card;  // 身份证号
 };
 
+// 线程池
+class ThreadPool {
+public:
+    using Task = std::function<void()>;
+
+    ThreadPool(int num = 10) {
+        for (int i = 0; i < num; ++i) {
+            workers_.emplace_back([this] {
+                while (true) {
+                    Task task;
+                    {
+                        std::unique_lock<std::mutex> lock(mtx_);
+                        cv_.wait(lock, [this] {
+                            return stop_ || !tasks_.empty();
+                        });
+                        if (stop_ && tasks_.empty()) return;
+                        task = move(tasks_.front());
+                        tasks_.pop();
+                    }
+                    task();
+                }
+            });
+        }
+    }
+
+    ~ThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : workers_) t.join();
+    }
+
+    void add_task(Task task) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        tasks_.emplace(move(task));
+        cv_.notify_one();
+    }
+
+private:
+    vector<std::thread> workers_;
+    queue<Task> tasks_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+};
+
+// 全局线程池（extern）
+extern ThreadPool g_pool;
